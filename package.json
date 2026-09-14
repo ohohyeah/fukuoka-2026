@@ -1,0 +1,13 @@
+{
+  "name": "fukuoka-2026-travel",
+  "version": "1.0.0",
+  "description": "2026 北九州 8天7夜親子之旅專案與 Notion 自動化同步工具",
+  "main": "scripts/sync-notion.js",
+  "scripts": {
+    "sync": "node scripts/sync-notion.js --all",
+    "sync:git": "node scripts/sync-notion.js --git"
+  },
+  "keywords": ["notion", "sync", "fukuoka"],
+  "author": "",
+  "license": "ISC"
+}
