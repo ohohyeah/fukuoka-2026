@@ -42,59 +42,133 @@ const CHILD_PAGE_URLS = {
   '05-預算分攤.md': 'https://app.notion.com/p/3dbd9f07d8de815491a9fe1a8ccab0a3',
 };
 
-// 3. 解析 Rich Text (處理 **粗體**, `程式碼`, [連結](url))
-function parseRichText(text) {
-  if (!text) return [];
-  const result = [];
-  // 簡化連環正則解析
-  const regex = /(\*\*(.*?)\*\*|`([^`]+)`|\[([^\]]+)\]\(([^)]+)\))/g;
-  let lastIndex = 0;
-  let match;
+// 3. 解析 URL (處理相對路徑、錨點與 Notion URL 轉換)
+function resolveUrl(rawUrl, currentFileBasename) {
+  if (!rawUrl) return null;
+  let url = rawUrl.trim();
 
-  while ((match = regex.exec(text)) !== null) {
-    if (match.index > lastIndex) {
-      result.push({
-        type: 'text',
-        text: { content: text.slice(lastIndex, match.index) }
-      });
-    }
-
-    if (match[2] !== undefined) {
-      // 粗體 **text**
-      result.push({
-        type: 'text',
-        text: { content: match[2] },
-        annotations: { bold: true }
-      });
-    } else if (match[3] !== undefined) {
-      // 程式碼 `code`
-      result.push({
-        type: 'text',
-        text: { content: match[3] },
-        annotations: { code: true }
-      });
-    } else if (match[4] !== undefined && match[5] !== undefined) {
-      // 連結 [text](url)
-      result.push({
-        type: 'text',
-        text: { content: match[4], link: { url: match[5] } }
-      });
-    }
-
-    lastIndex = regex.lastIndex;
+  // 外部絕對連結 (http://, https://, mailto:)
+  if (/^(https?:\/\/|mailto:)/i.test(url)) {
+    return url;
   }
 
-  if (lastIndex < text.length) {
-    result.push({
-      type: 'text',
-      text: { content: text.slice(lastIndex) }
-    });
+  let decoded = decodeURIComponent(url);
+
+  // 頁面內錨點 (#anchor)
+  if (decoded.startsWith('#')) {
+    const currentPageId = PAGE_MAP[currentFileBasename];
+    if (currentPageId) {
+      const pageIdNoDash = currentPageId.replace(/-/g, '');
+      return encodeURI(`https://www.notion.so/${pageIdNoDash}${decoded}`);
+    }
+    return null;
   }
 
-  return result.length > 0 ? result : [{ type: 'text', text: { content: text } }];
+  // 本地相對 Markdown 檔案連結 (例如 ./01-機票住宿.md)
+  let hash = '';
+  if (decoded.includes('#')) {
+    const parts = decoded.split('#');
+    decoded = parts[0];
+    hash = '#' + parts.slice(1).join('#');
+  }
+
+  const filename = path.basename(decoded);
+  let targetKey = PAGE_MAP[filename] ? filename : null;
+  if (!targetKey) {
+    const prefix = filename.split('-')[0];
+    if (prefix && /^\d+$/.test(prefix)) {
+      targetKey = Object.keys(PAGE_MAP).find(k => k.startsWith(prefix + '-'));
+    }
+  }
+
+  if (targetKey && PAGE_MAP[targetKey]) {
+    const targetPageId = PAGE_MAP[targetKey].replace(/-/g, '');
+    return encodeURI(`https://www.notion.so/${targetPageId}${hash}`);
+  }
+
+  return url;
 }
 
-// 4. 解析 Markdown 行為 Notion 區塊結構
+// 4. 解析 Rich Text (遞迴處理嵌套標籤 **粗體**, `程式碼`, *斜體*, [連結](url))
+function parseRichText(text, currentFileBasename, state = {}) {
+  if (!text) return [];
+
+  const results = [];
+
+  const LINK_REGEX = /\[([^\]]+)\]\(([^)]+)\)/;
+  const BOLD_REGEX = /\*\*(.*?)\*\*/;
+  const CODE_REGEX = /`([^`]+)`/;
+  const ITALIC_REGEX = /\*(.*?)\*/;
+
+  let remaining = text;
+
+  while (remaining.length > 0) {
+    const linkMatch = LINK_REGEX.exec(remaining);
+    const boldMatch = BOLD_REGEX.exec(remaining);
+    const codeMatch = CODE_REGEX.exec(remaining);
+    const italicMatch = ITALIC_REGEX.exec(remaining);
+
+    const matches = [];
+    if (linkMatch) matches.push({ type: 'link', match: linkMatch, index: linkMatch.index });
+    if (boldMatch) matches.push({ type: 'bold', match: boldMatch, index: boldMatch.index });
+    if (codeMatch) matches.push({ type: 'code', match: codeMatch, index: codeMatch.index });
+    if (italicMatch) matches.push({ type: 'italic', match: italicMatch, index: italicMatch.index });
+
+    if (matches.length === 0) {
+      const item = { type: 'text', text: { content: remaining } };
+      if (state.linkUrl) item.text.link = { url: state.linkUrl };
+      const annotations = {};
+      if (state.bold) annotations.bold = true;
+      if (state.code) annotations.code = true;
+      if (state.italic) annotations.italic = true;
+      if (Object.keys(annotations).length > 0) item.annotations = annotations;
+      results.push(item);
+      break;
+    }
+
+    matches.sort((a, b) => a.index - b.index);
+    const earliest = matches[0];
+
+    if (earliest.index > 0) {
+      const plainText = remaining.slice(0, earliest.index);
+      const item = { type: 'text', text: { content: plainText } };
+      if (state.linkUrl) item.text.link = { url: state.linkUrl };
+      const annotations = {};
+      if (state.bold) annotations.bold = true;
+      if (state.code) annotations.code = true;
+      if (state.italic) annotations.italic = true;
+      if (Object.keys(annotations).length > 0) item.annotations = annotations;
+      results.push(item);
+    }
+
+    const m = earliest.match;
+    if (earliest.type === 'link') {
+      const linkLabel = m[1];
+      const rawUrl = m[2];
+      const resolved = resolveUrl(rawUrl, currentFileBasename);
+      const subState = { ...state, linkUrl: resolved || state.linkUrl };
+      results.push(...parseRichText(linkLabel, currentFileBasename, subState));
+    } else if (earliest.type === 'bold') {
+      const innerText = m[1];
+      const subState = { ...state, bold: true };
+      results.push(...parseRichText(innerText, currentFileBasename, subState));
+    } else if (earliest.type === 'code') {
+      const innerText = m[1];
+      const subState = { ...state, code: true };
+      results.push(...parseRichText(innerText, currentFileBasename, subState));
+    } else if (earliest.type === 'italic') {
+      const innerText = m[1];
+      const subState = { ...state, italic: true };
+      results.push(...parseRichText(innerText, currentFileBasename, subState));
+    }
+
+    remaining = remaining.slice(earliest.index + m[0].length);
+  }
+
+  return results.length > 0 ? results : [{ type: 'text', text: { content: text } }];
+}
+
+// 5. 解析 Markdown 行為 Notion 區塊結構
 function markdownToBlocks(content, fileBasename) {
   const lines = content.split(/\r?\n/);
   const blocks = [];
@@ -121,7 +195,7 @@ function markdownToBlocks(content, fileBasename) {
       blocks.push({
         object: 'block',
         type: 'heading_1',
-        heading_1: { rich_text: parseRichText(trimmed.slice(2).trim()) }
+        heading_1: { rich_text: parseRichText(trimmed.slice(2).trim(), fileBasename) }
       });
       i++;
       continue;
@@ -130,7 +204,7 @@ function markdownToBlocks(content, fileBasename) {
       blocks.push({
         object: 'block',
         type: 'heading_2',
-        heading_2: { rich_text: parseRichText(trimmed.slice(3).trim()) }
+        heading_2: { rich_text: parseRichText(trimmed.slice(3).trim(), fileBasename) }
       });
       i++;
       continue;
@@ -139,7 +213,7 @@ function markdownToBlocks(content, fileBasename) {
       blocks.push({
         object: 'block',
         type: 'heading_3',
-        heading_3: { rich_text: parseRichText(trimmed.slice(4).trim()) }
+        heading_3: { rich_text: parseRichText(trimmed.slice(4).trim(), fileBasename) }
       });
       i++;
       continue;
@@ -151,7 +225,7 @@ function markdownToBlocks(content, fileBasename) {
       blocks.push({
         object: 'block',
         type: 'quote',
-        quote: { rich_text: parseRichText(quoteText) }
+        quote: { rich_text: parseRichText(quoteText, fileBasename) }
       });
       i++;
       continue;
@@ -164,7 +238,7 @@ function markdownToBlocks(content, fileBasename) {
       blocks.push({
         object: 'block',
         type: 'to_do',
-        to_do: { rich_text: parseRichText(todoText), checked: checked }
+        to_do: { rich_text: parseRichText(todoText, fileBasename), checked: checked }
       });
       i++;
       continue;
@@ -176,7 +250,7 @@ function markdownToBlocks(content, fileBasename) {
       blocks.push({
         object: 'block',
         type: 'bulleted_list_item',
-        bulleted_list_item: { rich_text: parseRichText(bulletText) }
+        bulleted_list_item: { rich_text: parseRichText(bulletText, fileBasename) }
       });
       i++;
       continue;
@@ -200,7 +274,7 @@ function markdownToBlocks(content, fileBasename) {
         const cells = rowLine
           .slice(1, -1)
           .split('|')
-          .map(cell => parseRichText(cell.trim().replace(/<br\s*\/?>/gi, '\n')));
+          .map(cell => parseRichText(cell.trim().replace(/<br\s*\/?>/gi, '\n'), fileBasename));
 
         if (width === 0) width = cells.length;
 
@@ -230,7 +304,7 @@ function markdownToBlocks(content, fileBasename) {
     blocks.push({
       object: 'block',
       type: 'paragraph',
-      paragraph: { rich_text: parseRichText(trimmed) }
+      paragraph: { rich_text: parseRichText(trimmed, fileBasename) }
     });
     i++;
   }
