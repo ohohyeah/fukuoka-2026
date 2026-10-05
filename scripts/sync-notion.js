@@ -312,7 +312,29 @@ function markdownToBlocks(content, fileBasename) {
   return blocks;
 }
 
-// 5. 調用 Notion API 清空與更新區塊
+// 5. 輔助函式：包裝 fetch 支援 429 頻率限制與網路錯誤自動指數退避重試
+async function fetchWithRetry(url, options = {}, maxRetries = 5, initialDelay = 500) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await fetch(url, options);
+      if (res.status === 429) {
+        const retryAfter = res.headers.get('retry-after');
+        const delay = retryAfter ? parseInt(retryAfter, 10) * 1000 : initialDelay * Math.pow(2, attempt - 1);
+        console.warn(`⏳ Notion API 觸發頻率限制 (429)，等待 ${delay}ms 後重試 (第 ${attempt}/${maxRetries} 次)...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+      return res;
+    } catch (err) {
+      if (attempt === maxRetries) throw err;
+      const delay = initialDelay * Math.pow(2, attempt - 1);
+      console.warn(`⚠️ 網路請求異常 (${err.message})，等待 ${delay}ms 後重試...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+}
+
+// 6. 調用 Notion API 清空與更新區塊
 async function updateNotionPage(pageId, blocks, fileBasename) {
   const headers = {
     'Authorization': `Bearer ${NOTION_TOKEN}`,
@@ -320,46 +342,81 @@ async function updateNotionPage(pageId, blocks, fileBasename) {
     'Content-Type': 'application/json'
   };
 
-  // 取得頁面上所有現有區塊
-  const res = await fetch(`https://api.notion.com/v1/blocks/${pageId}/children?page_size=100`, { headers });
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`無法讀取頁面區塊 (${res.status}): ${errText}`);
+  // 完整分頁取得頁面上所有現有區塊
+  const existingBlocks = [];
+  let cursor = undefined;
+
+  while (true) {
+    let url = `https://api.notion.com/v1/blocks/${pageId}/children?page_size=100`;
+    if (cursor) {
+      url += `&start_cursor=${encodeURIComponent(cursor)}`;
+    }
+
+    const res = await fetchWithRetry(url, { headers });
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`無法讀取頁面區塊 (${res.status}): ${errText}`);
+    }
+
+    const existingData = await res.json();
+    if (existingData.results && existingData.results.length > 0) {
+      existingBlocks.push(...existingData.results);
+    }
+
+    if (!existingData.has_more || !existingData.next_cursor) {
+      break;
+    }
+    cursor = existingData.next_cursor;
   }
 
-  const existingData = await res.json();
-  const existingBlocks = existingData.results || [];
-
   // 清理非子頁面的既有區塊
-  for (const block of existingBlocks) {
-    if (block.type === 'child_page' || block.type === 'child_database') {
-      // 保留 Notion 中的子頁面
-      continue;
+  const blocksToDelete = existingBlocks.filter(
+    block => block.type !== 'child_page' && block.type !== 'child_database'
+  );
+
+  if (blocksToDelete.length > 0) {
+    console.log(`   🧹 正在清除 ${blocksToDelete.length} 個舊區塊...`);
+    for (let idx = 0; idx < blocksToDelete.length; idx++) {
+      const block = blocksToDelete[idx];
+      const delRes = await fetchWithRetry(`https://api.notion.com/v1/blocks/${block.id}`, {
+        method: 'DELETE',
+        headers
+      });
+
+      if (!delRes || !delRes.ok) {
+        const errText = delRes ? await delRes.text() : 'No response';
+        console.warn(`⚠️ 刪除區塊 ${block.id} 失敗:`, errText);
+      }
+
+      // 每 10 個刪除稍作延遲，避免連續大量請求觸發 429
+      if (idx % 10 === 0 && idx > 0) {
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
     }
-    await fetch(`https://api.notion.com/v1/blocks/${block.id}`, {
-      method: 'DELETE',
-      headers
-    });
   }
 
   // 分批寫入新區塊 (每次上限 100)
   const chunkSize = 100;
+  console.log(`   ✍️ 正在寫入 ${blocks.length} 個新區塊（共 ${Math.ceil(blocks.length / chunkSize)} 批）...`);
   for (let c = 0; c < blocks.length; c += chunkSize) {
     const chunk = blocks.slice(c, c + chunkSize);
-    const appendRes = await fetch(`https://api.notion.com/v1/blocks/${pageId}/children`, {
+    const appendRes = await fetchWithRetry(`https://api.notion.com/v1/blocks/${pageId}/children`, {
       method: 'PATCH',
       headers,
       body: JSON.stringify({ children: chunk })
     });
 
-    if (!appendRes.ok) {
-      const errText = await appendRes.text();
-      console.error(`⚠️ 寫入 Notion 區塊失敗 (${appendRes.status}):`, errText);
+    if (!appendRes || !appendRes.ok) {
+      const errText = appendRes ? await appendRes.text() : 'No response';
+      console.error(`⚠️ 寫入 Notion 區塊失敗:`, errText);
+    } else {
+      // 批次寫入間隔微小延遲
+      await new Promise(resolve => setTimeout(resolve, 300));
     }
   }
 }
 
-// 6. 主同步入口
+// 7. 主同步入口
 async function main() {
   if (!NOTION_TOKEN) {
     console.log('ℹ️ 未檢測到 NOTION_TOKEN 環境變數。請在專案根目錄建立 .env 設定 NOTION_TOKEN=secret_xxx。');
