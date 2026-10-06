@@ -5,7 +5,9 @@
   "main": "scripts/sync-notion.js",
   "scripts": {
     "sync": "node scripts/sync-notion.js --all",
-    "sync:git": "node scripts/sync-notion.js --git"
+    "sync:git": "node scripts/sync-notion.js --git",
+    "sync:force": "node scripts/sync-notion.js --force",
+    "sync:full": "node scripts/sync-notion.js --full"
   },
   "keywords": ["notion", "sync", "fukuoka"],
   "author": "",

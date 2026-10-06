@@ -4,3 +4,6 @@
 # Node.js
 node_modules/
 npm-debug.log*
+
+# Notion Sync State Cache
+.notion-sync-state.json
