@@ -407,7 +407,12 @@ function getBlockSignature(block) {
   }
 
   if (type === 'table') {
-    return `table:${content.table_width}:${content.has_column_header ? '1' : '0'}`;
+    const rows = block.table?.children || block.children || [];
+    const rowsSign = rows.map(r => {
+      const cells = r.table_row?.cells || [];
+      return cells.map(cell => normalizeRichTextList(cell)).join('|');
+    }).join(';');
+    return `table:${content.table_width}:${content.has_column_header ? '1' : '0'}:${rowsSign}`;
   }
 
   if (content.rich_text) {
@@ -481,6 +486,23 @@ async function fetchAllExistingBlocks(pageId, headers) {
       break;
     }
     cursor = data.next_cursor;
+  }
+
+  // 補充讀取 table 的 children (table_row)，以利精準比對表格內容
+  for (const block of existingBlocks) {
+    if (block.type === 'table') {
+      try {
+        const rowsRes = await fetchWithRetry(`https://api.notion.com/v1/blocks/${block.id}/children?page_size=100`, { headers });
+        if (rowsRes && rowsRes.ok) {
+          const rowsData = await rowsRes.json();
+          if (block.table) {
+            block.table.children = rowsData.results || [];
+          }
+        }
+      } catch (err) {
+        console.warn(`⚠️ 讀取表格 ${block.id} 列內容失敗:`, err.message);
+      }
+    }
   }
 
   return existingBlocks;
