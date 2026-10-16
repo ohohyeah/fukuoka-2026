@@ -192,6 +192,17 @@ function markdownToBlocks(content, fileBasename) {
       continue;
     }
 
+    // 目錄 (Table of Contents)
+    if (/^\[toc\]$/i.test(trimmed) || /^<!--\s*toc\s*-->$/i.test(trimmed)) {
+      blocks.push({
+        object: 'block',
+        type: 'table_of_contents',
+        table_of_contents: { color: 'default' }
+      });
+      i++;
+      continue;
+    }
+
     // 標題 1~3
     if (trimmed.startsWith('# ')) {
       blocks.push({
@@ -384,6 +395,7 @@ function getBlockSignature(block) {
   if (!block || !block.type) return '';
   const type = block.type;
   if (type === 'divider') return 'divider';
+  if (type === 'table_of_contents') return 'table_of_contents';
   if (type === 'child_page' || type === 'child_database') return `${type}:${block.id}`;
 
   const content = block[type];
