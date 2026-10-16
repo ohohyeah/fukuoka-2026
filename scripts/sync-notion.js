@@ -92,8 +92,9 @@ function resolveUrl(rawUrl, currentFileBasename) {
 }
 
 // 4. 解析 Rich Text (遞迴處理嵌套標籤 **粗體**, `程式碼`, *斜體*, [連結](url))
-function parseRichText(text, currentFileBasename, state = {}) {
-  if (!text) return [];
+function parseRichText(rawText, currentFileBasename, state = {}) {
+  if (!rawText) return [];
+  const text = typeof rawText === 'string' ? rawText.replace(/<br\s*\/?>/gi, '\n') : rawText;
 
   const results = [];
 
@@ -171,8 +172,7 @@ function parseRichText(text, currentFileBasename, state = {}) {
 }
 
 // 5. 解析 Markdown 行為 Notion 區塊結構
-function markdownToBlocks(content, fileBasename) {
-  const lines = content.split(/\r?\n/);
+function parseBlocksFromLines(lines, fileBasename) {
   const blocks = [];
   let i = 0;
 
@@ -200,6 +200,69 @@ function markdownToBlocks(content, fileBasename) {
         table_of_contents: { color: 'default' }
       });
       i++;
+      continue;
+    }
+
+    // 檢查是否為可摺疊標題 (Toggle Heading)
+    const isToggleHeading = 
+      (trimmed.startsWith('### > ') || trimmed.startsWith('## > ')) ||
+      (fileBasename === '03-每日詳細行程.md' && (
+        trimmed.startsWith('### 🗓️ Day') ||
+        trimmed.startsWith('## 🌟 季節限定活動') ||
+        trimmed.startsWith('### 📍 推薦名店清單') ||
+        trimmed.startsWith('### 👨‍👩‍👧‍👦 親子團')
+      ));
+
+    if (isToggleHeading) {
+      let level = 3;
+      let rawHeading = trimmed;
+      if (rawHeading.startsWith('## > ')) {
+        level = 2;
+        rawHeading = rawHeading.slice(5).trim();
+      } else if (rawHeading.startsWith('### > ')) {
+        level = 3;
+        rawHeading = rawHeading.slice(6).trim();
+      } else if (rawHeading.startsWith('## ')) {
+        level = 2;
+        rawHeading = rawHeading.slice(3).trim();
+      } else if (rawHeading.startsWith('### ')) {
+        level = 3;
+        rawHeading = rawHeading.slice(4).trim();
+      }
+
+      i++;
+      const childLines = [];
+      while (i < lines.length) {
+        const nextTrimmed = lines[i].trim();
+        // 遇到 --- 分隔線結束當前 toggle
+        if (nextTrimmed === '---' || nextTrimmed === '***' || nextTrimmed === '___') {
+          break;
+        }
+        // 遇到 # 或 ## 或 ### 標題結束當前 toggle（避免吃掉下一個章節）
+        if (nextTrimmed.startsWith('# ') || nextTrimmed.startsWith('## ') || nextTrimmed.startsWith('### ')) {
+          break;
+        }
+        childLines.push(lines[i]);
+        i++;
+      }
+
+      const childBlocks = parseBlocksFromLines(childLines, fileBasename);
+      const headingType = `heading_${level}`;
+
+      const toggleBlock = {
+        object: 'block',
+        type: headingType,
+        [headingType]: {
+          rich_text: parseRichText(rawHeading, fileBasename),
+          is_toggleable: true
+        }
+      };
+
+      if (childBlocks.length > 0) {
+        toggleBlock.children = childBlocks;
+      }
+
+      blocks.push(toggleBlock);
       continue;
     }
 
@@ -232,15 +295,18 @@ function markdownToBlocks(content, fileBasename) {
       continue;
     }
 
-    // 引用 / Callout
+    // 引用 / Callout (支援連續多行 > 合併為單一引言區塊)
     if (trimmed.startsWith('> ')) {
-      const quoteText = trimmed.slice(2).trim();
+      const quoteLines = [];
+      while (i < lines.length && lines[i].trim().startsWith('> ')) {
+        quoteLines.push(lines[i].trim().slice(2).trim());
+        i++;
+      }
       blocks.push({
         object: 'block',
         type: 'quote',
-        quote: { rich_text: parseRichText(quoteText, fileBasename) }
+        quote: { rich_text: parseRichText(quoteLines.join('\n'), fileBasename) }
       });
-      i++;
       continue;
     }
 
@@ -252,6 +318,18 @@ function markdownToBlocks(content, fileBasename) {
         object: 'block',
         type: 'to_do',
         to_do: { rich_text: parseRichText(todoText, fileBasename), checked: checked }
+      });
+      i++;
+      continue;
+    }
+
+    // 編號清單 (1. 2. 3.)
+    if (/^\d+\.\s+/.test(trimmed)) {
+      const numText = trimmed.replace(/^\d+\.\s+/, '').trim();
+      blocks.push({
+        object: 'block',
+        type: 'numbered_list_item',
+        numbered_list_item: { rich_text: parseRichText(numText, fileBasename) }
       });
       i++;
       continue;
@@ -323,6 +401,11 @@ function markdownToBlocks(content, fileBasename) {
   }
 
   return blocks;
+}
+
+function markdownToBlocks(content, fileBasename) {
+  const lines = content.split(/\r?\n/);
+  return parseBlocksFromLines(lines, fileBasename);
 }
 
 // 5. 輔助函式：包裝 fetch 支援 429 頻率限制與網路錯誤自動指數退避重試
@@ -415,11 +498,15 @@ function getBlockSignature(block) {
     return `table:${content.table_width}:${content.has_column_header ? '1' : '0'}:${rowsSign}`;
   }
 
+  const isToggle = content.is_toggleable ? 'toggle:' : '';
+  const children = block.children || block[type]?.children || [];
+  const childrenSign = children.length > 0 ? `:{${children.map(getBlockSignature).join(';')}}` : '';
+
   if (content.rich_text) {
-    return `${type}:${normalizeRichTextList(content.rich_text)}`;
+    return `${type}:${isToggle}${normalizeRichTextList(content.rich_text)}${childrenSign}`;
   }
 
-  return type;
+  return `${type}:${isToggle}${childrenSign}`;
 }
 
 // 8. LCS 最長公共子序列算法 (找出未變動錨點)
@@ -488,7 +575,7 @@ async function fetchAllExistingBlocks(pageId, headers) {
     cursor = data.next_cursor;
   }
 
-  // 補充讀取 table 的 children (table_row)，以利精準比對表格內容
+  // 補充讀取 table 及具備子區塊 (has_children) 的 children，以利精準比對與 diff
   for (const block of existingBlocks) {
     if (block.type === 'table') {
       try {
@@ -501,6 +588,16 @@ async function fetchAllExistingBlocks(pageId, headers) {
         }
       } catch (err) {
         console.warn(`⚠️ 讀取表格 ${block.id} 列內容失敗:`, err.message);
+      }
+    } else if (block.has_children && block.type !== 'child_page' && block.type !== 'child_database') {
+      try {
+        const childRes = await fetchWithRetry(`https://api.notion.com/v1/blocks/${block.id}/children?page_size=100`, { headers });
+        if (childRes && childRes.ok) {
+          const childData = await childRes.json();
+          block.children = childData.results || [];
+        }
+      } catch (err) {
+        console.warn(`⚠️ 讀取區塊 ${block.id} 子項目失敗:`, err.message);
       }
     }
   }
@@ -542,7 +639,19 @@ async function insertBlocks(pageId, blocks, afterId, headers) {
 
   for (let c = 0; c < blocks.length; c += chunkSize) {
     const chunk = blocks.slice(c, c + chunkSize);
-    const body = { children: chunk };
+
+    // Notion API 的 append block children 不支援在頂層直接帶有 children 屬性，
+    // 因此在發送時將其抽離，待父區塊成功建立後再將其寫入該父區塊。
+    const cleanChunk = chunk.map(b => {
+      if (b.children && b.children.length > 0) {
+        const copy = { ...b };
+        delete copy.children;
+        return { block: copy, children: b.children };
+      }
+      return { block: b, children: null };
+    });
+
+    const body = { children: cleanChunk.map(item => item.block) };
     if (currentAfter) {
       body.after = currentAfter;
     }
@@ -557,10 +666,19 @@ async function insertBlocks(pageId, blocks, afterId, headers) {
     }
     const data = await res.json();
     if (data.results && data.results.length > 0) {
-      for (const b of data.results) {
+      const newlyCreatedCount = Math.min(cleanChunk.length, data.results.length);
+      for (let idx = 0; idx < newlyCreatedCount; idx++) {
+        const b = data.results[idx];
         createdIds.push(b.id);
+
+        const itemInfo = cleanChunk[idx];
+        if (itemInfo && itemInfo.children && itemInfo.children.length > 0) {
+          await insertBlocks(b.id, itemInfo.children, null, headers);
+        }
       }
-      currentAfter = data.results[data.results.length - 1].id;
+      if (newlyCreatedCount > 0) {
+        currentAfter = data.results[newlyCreatedCount - 1].id;
+      }
     }
     await new Promise(r => setTimeout(r, 200));
   }
@@ -638,7 +756,9 @@ async function incrementalUpdatePage(pageId, manageableExisting, newBlocks, head
         const oldB = oldChunk[k];
         const newB = newChunk[k];
 
-        if (oldB.type === newB.type && oldB.type !== 'table' && oldB.type !== 'divider') {
+        const hasChildrenOrToggle = oldB.has_children || !!(newB.children && newB.children.length > 0) || !!newB[newB.type]?.is_toggleable || !!oldB[oldB.type]?.is_toggleable;
+
+        if (oldB.type === newB.type && oldB.type !== 'table' && oldB.type !== 'divider' && !hasChildrenOrToggle) {
           await patchBlock(oldB.id, newB, headers);
           stats.patched++;
           currentAfterId = oldB.id;
