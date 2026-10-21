@@ -391,13 +391,35 @@ function parseBlocksFromLines(lines, fileBasename) {
       continue;
     }
 
-    // 一般段落
-    blocks.push({
-      object: 'block',
-      type: 'paragraph',
-      paragraph: { rich_text: parseRichText(trimmed, fileBasename) }
-    });
-    i++;
+    // 一般段落 (收集連續行合併為單一含換行的段落區塊，使卡片緊湊成單一區塊)
+    const paraLines = [];
+    while (i < lines.length) {
+      const nextLine = lines[i];
+      const nextTrimmed = nextLine.trim();
+      if (!nextTrimmed) break;
+      if (
+        nextTrimmed === '---' || nextTrimmed === '***' || nextTrimmed === '___' ||
+        /^\[toc\]$/i.test(nextTrimmed) || /^<!--\s*toc\s*-->$/i.test(nextTrimmed) ||
+        nextTrimmed.startsWith('# ') || nextTrimmed.startsWith('## ') || nextTrimmed.startsWith('### ') ||
+        nextTrimmed.startsWith('> ') ||
+        nextTrimmed.startsWith('- [ ] ') || nextTrimmed.startsWith('- [x] ') || nextTrimmed.startsWith('- [X] ') ||
+        /^\d+\.\s+/.test(nextTrimmed) ||
+        nextTrimmed.startsWith('- ') || nextTrimmed.startsWith('* ') ||
+        (nextTrimmed.startsWith('|') && nextTrimmed.endsWith('|'))
+      ) {
+        break;
+      }
+      paraLines.push(nextTrimmed);
+      i++;
+    }
+
+    if (paraLines.length > 0) {
+      blocks.push({
+        object: 'block',
+        type: 'paragraph',
+        paragraph: { rich_text: parseRichText(paraLines.join('\n'), fileBasename) }
+      });
+    }
   }
 
   return blocks;
