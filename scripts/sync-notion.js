@@ -247,6 +247,36 @@ function parseBlocksFromLines(lines, fileBasename) {
       }
 
       const childBlocks = parseBlocksFromLines(childLines, fileBasename);
+
+      // 若為每日行程或屋台推薦，套用斑馬紋交替底色 (gray_background)
+      if (fileBasename === '03-每日詳細行程.md') {
+        if (rawHeading.startsWith('🗓️ Day')) {
+          let timeCardIdx = 0;
+          for (const cb of childBlocks) {
+            if (cb.type === 'paragraph') {
+              const plain = getRichTextPlainText(cb.paragraph?.rich_text);
+              if (/^\d{1,2}:\d{2}\s*–/.test(plain)) {
+                cb.paragraph.color = (timeCardIdx % 2 === 0) ? 'gray_background' : 'default';
+                timeCardIdx++;
+              } else if (plain.includes('本日用餐推薦與備案')) {
+                cb.paragraph.color = 'gray_background';
+              }
+            }
+          }
+        } else if (rawHeading.startsWith('📍 推薦名店清單')) {
+          let yataiCardIdx = 0;
+          for (const cb of childBlocks) {
+            if (cb.type === 'paragraph') {
+              const plain = getRichTextPlainText(cb.paragraph?.rich_text);
+              if (plain.includes('導航') || plain.includes('推薦必點')) {
+                cb.paragraph.color = (yataiCardIdx % 2 === 0) ? 'gray_background' : 'default';
+                yataiCardIdx++;
+              }
+            }
+          }
+        }
+      }
+
       const headingType = `heading_${level}`;
 
       const toggleBlock = {
@@ -521,14 +551,15 @@ function getBlockSignature(block) {
   }
 
   const isToggle = content.is_toggleable ? 'toggle:' : '';
+  const color = content.color && content.color !== 'default' ? `color:${content.color}:` : '';
   const children = block.children || block[type]?.children || [];
   const childrenSign = children.length > 0 ? `:{${children.map(getBlockSignature).join(';')}}` : '';
 
   if (content.rich_text) {
-    return `${type}:${isToggle}${normalizeRichTextList(content.rich_text)}${childrenSign}`;
+    return `${type}:${isToggle}${color}${normalizeRichTextList(content.rich_text)}${childrenSign}`;
   }
 
-  return `${type}:${isToggle}${childrenSign}`;
+  return `${type}:${isToggle}${color}${childrenSign}`;
 }
 
 // 8. LCS 最長公共子序列算法 (找出未變動錨點)
