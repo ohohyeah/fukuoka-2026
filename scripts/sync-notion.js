@@ -172,9 +172,10 @@ function parseRichText(rawText, currentFileBasename, state = {}) {
 }
 
 // 5. 解析 Markdown 行為 Notion 區塊結構
-function parseBlocksFromLines(lines, fileBasename) {
+function parseBlocksFromLines(lines, fileBasename, isTopLevel = false) {
   const blocks = [];
   let i = 0;
+  let hasSkippedTopH1 = false;
 
   while (i < lines.length) {
     const line = lines[i];
@@ -214,19 +215,19 @@ function parseBlocksFromLines(lines, fileBasename) {
       ));
 
     if (isToggleHeading) {
-      let level = 3;
+      let level = 2; // 預設 ### 升級為 heading_2
       let rawHeading = trimmed;
       if (rawHeading.startsWith('## > ')) {
-        level = 2;
+        level = 1; // ## 升級為 heading_1
         rawHeading = rawHeading.slice(5).trim();
       } else if (rawHeading.startsWith('### > ')) {
-        level = 3;
+        level = 2; // ### 升級為 heading_2
         rawHeading = rawHeading.slice(6).trim();
       } else if (rawHeading.startsWith('## ')) {
-        level = 2;
+        level = 1; // ## 升級為 heading_1
         rawHeading = rawHeading.slice(3).trim();
       } else if (rawHeading.startsWith('### ')) {
-        level = 3;
+        level = 2; // ### 升級為 heading_2
         rawHeading = rawHeading.slice(4).trim();
       }
 
@@ -246,7 +247,7 @@ function parseBlocksFromLines(lines, fileBasename) {
         i++;
       }
 
-      const childBlocks = parseBlocksFromLines(childLines, fileBasename);
+      const childBlocks = parseBlocksFromLines(childLines, fileBasename, false);
 
       // 若為每日行程或屋台推薦，套用斑馬紋交替底色 (gray_background)
       if (fileBasename === '03-每日詳細行程.md') {
@@ -296,8 +297,13 @@ function parseBlocksFromLines(lines, fileBasename) {
       continue;
     }
 
-    // 標題 1~3
+    // 標題 1~4 處理（自動升級一級，並跳過頂部第一個 # 一級標題以減少縮排）
     if (trimmed.startsWith('# ')) {
+      if (isTopLevel && !hasSkippedTopH1) {
+        hasSkippedTopH1 = true;
+        i++;
+        continue; // 跳過頂部第一個 # 標題（Notion 原生已有 Page Title）
+      }
       blocks.push({
         object: 'block',
         type: 'heading_1',
@@ -306,20 +312,50 @@ function parseBlocksFromLines(lines, fileBasename) {
       i++;
       continue;
     }
+
     if (trimmed.startsWith('## ')) {
+      // 檢查是否為章節目錄引言標題（例如「## 📑 本頁章節目錄」），若是則轉為粗體段落避免列入 Notion TOC
+      const isTocHeading = trimmed.includes('本頁章節目錄') ||
+        (i + 1 < lines.length && /^(\[toc\]|<!--\s*toc\s*-->)$/i.test(lines[i + 1].trim())) ||
+        (i + 2 < lines.length && !lines[i + 1].trim() && /^(\[toc\]|<!--\s*toc\s*-->)$/i.test(lines[i + 2].trim()));
+
+      if (isTocHeading) {
+        blocks.push({
+          object: 'block',
+          type: 'paragraph',
+          paragraph: { rich_text: parseRichText(`**${trimmed.slice(3).trim()}**`, fileBasename) }
+        });
+        i++;
+        continue;
+      }
+
+      // ## 升級為 heading_1
       blocks.push({
         object: 'block',
-        type: 'heading_2',
-        heading_2: { rich_text: parseRichText(trimmed.slice(3).trim(), fileBasename) }
+        type: 'heading_1',
+        heading_1: { rich_text: parseRichText(trimmed.slice(3).trim(), fileBasename) }
       });
       i++;
       continue;
     }
+
     if (trimmed.startsWith('### ')) {
+      // ### 升級為 heading_2
+      blocks.push({
+        object: 'block',
+        type: 'heading_2',
+        heading_2: { rich_text: parseRichText(trimmed.slice(4).trim(), fileBasename) }
+      });
+      i++;
+      continue;
+    }
+
+    if (trimmed.startsWith('#### ')) {
+      // #### 升級為 heading_3
       blocks.push({
         object: 'block',
         type: 'heading_3',
-        heading_3: { rich_text: parseRichText(trimmed.slice(4).trim(), fileBasename) }
+        heading_3: { rich_text: parseRichText(trimmed.slice(5).trim(), fileBasename) }
       });
       i++;
       continue;
@@ -430,7 +466,7 @@ function parseBlocksFromLines(lines, fileBasename) {
       if (
         nextTrimmed === '---' || nextTrimmed === '***' || nextTrimmed === '___' ||
         /^\[toc\]$/i.test(nextTrimmed) || /^<!--\s*toc\s*-->$/i.test(nextTrimmed) ||
-        nextTrimmed.startsWith('# ') || nextTrimmed.startsWith('## ') || nextTrimmed.startsWith('### ') ||
+        nextTrimmed.startsWith('# ') || nextTrimmed.startsWith('## ') || nextTrimmed.startsWith('### ') || nextTrimmed.startsWith('#### ') ||
         nextTrimmed.startsWith('> ') ||
         nextTrimmed.startsWith('- [ ] ') || nextTrimmed.startsWith('- [x] ') || nextTrimmed.startsWith('- [X] ') ||
         /^\d+\.\s+/.test(nextTrimmed) ||
@@ -457,7 +493,7 @@ function parseBlocksFromLines(lines, fileBasename) {
 
 function markdownToBlocks(content, fileBasename) {
   const lines = content.split(/\r?\n/);
-  return parseBlocksFromLines(lines, fileBasename);
+  return parseBlocksFromLines(lines, fileBasename, true);
 }
 
 // 5. 輔助函式：包裝 fetch 支援 429 頻率限制與網路錯誤自動指數退避重試
